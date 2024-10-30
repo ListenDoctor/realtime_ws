@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Listen.Doctor</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            text-align: center;
+        }
+        .custom-textarea {
+            width: 80%;
+            height: 400px;
+            background-color: #000; /* Fondo negro */
+            color: #63d363; /* Texto verde */
+            font-family: 'Courier New', Courier, monospace; /* Fuente monoespaciada */
+            font-size: 14px;
+            padding: 10px;
+            border: 1px solid #333; /* Borde sutil */
+            resize: vertical; /* Permitir solo redimensionar verticalmente */
+            outline: none; /* Quitar el borde de foco */
+            overflow-y: auto; /* Mostrar scroll si es necesario */
+            border-radius: 20px;
+            box-shadow: 0px 0px 20px gray;
+            resize: none;
+        }
+        button {
+            padding: 10px;
+            border-radius: 10px;
+            border: none;
+            box-shadow: 0px 0px 5px gray;
+            margin: 0px 10px 0px 10px;
+            cursor: pointer;
+        }
+
+
+        .sockets {
+           background-color: #ffd2d2;
+           color: #d24848;
+        }
+
+        .api {
+           background-color: #cceeff; 
+           color: #006CA7;
+        }
+
+        button.sockets:disabled, button.api:disabled {
+            color: #888 !important; /* Color del texto cuando está deshabilitado */
+        }
+
+        button:active {
+           background-color: #ccc; /* Cambia de color mientras se mantiene presionado */
+        }
+
+        #audio-visualizer {
+            width: 14%;
+            height: 50px;
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            margin: auto;
+        }
+
+        .visualizer-bar {
+            flex: 1;
+            background: linear-gradient(to top, #4a90e2, #f365d9);
+            transform-origin: bottom;
+            transition: height 0.05s ease;
+            border-radius: 2px 2px 0 0;
+            min-height: 0px;
+        }
+
+        @keyframes glow {
+            0% { filter: brightness(1); }
+            50% { filter: brightness(1.2); }
+            100% { filter: brightness(1); }
+        }
+
+        .visualizer-bar.active {
+            animation: glow 0.5s ease infinite;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Listen.Doctor</h1>
+    <h2>Sample for Api & Sockets testing</h2>
+    API <button class="api" id="getToken">1. Get Token</button>
+    <button class="api" id="fetchTemplates" disabled>2. Fetch Templates</button>
+    <button class="api" id="fetchSpecialities" disabled>3. Fetch Specialities</button>
+    <br><br>
+    Sockets <button class="sockets" id="connectBtn">1. Connect</button>
+    <button class="sockets" id="joinRoomBtn" disabled>2. Join Room</button>
+    <button class="sockets" id="startRecordingBtn" disabled>3. Start Recording</button>
+    <button class="sockets" id="stopRecordingBtn" disabled>4. Stop Recording</button>
+    <button class="sockets" id="disconnectBtn" disabled>5. Disconnect</button>
+    <br><br>
+    <button id="clearBtn">Clear Logs</button>
+    <button id="credentialsBtn">Credentials</button>
+    <div id="audio-visualizer"></div>
+    <br><br>
+    <textarea id="myTextarea" class="custom-textarea" readonly></textarea>
+    <br><br>
+    Main Library: <a href="https://socket.io/">Socket.IO</a> | Client Libraries: <a href="https://python-socketio.readthedocs.io/en/latest/">Python-SocketIO</a> | 
+    <a href="https://flask-socketio.readthedocs.io/en/latest/">Flask-SocketIO</a> | 
+    <a href="https://dhtml.github.io/phpsocket.io/">PHP Socket.IO</a> | 
+    <a href="https://github.com/socketio/socket.io-client-swift">Swift Socket.IO</a> |
+    <a href="https://github.com/socketio/socket.io-client-java">Android Socket.IO</a>
+
+    <script src="https://cdn.socket.io/4.0.1/socket.io.min.js"></script>
+    <script>
+        let socket; // Variable to store the Socket.IO connection
+        let mediaRecorder; // Variable to hold the media recorder (audio)
+        let audioChunks = []; // Array to store recorded audio chunks
+        let chunkInterval; // Interval for periodically sending audio chunks
+        let token = ''; // Variable to store the authentication token
+        let trunkSize = 10000; // Default chunk size for audio (10 seconds)
+
+        let animationFrame = null; // Variable to store the animation frame
+        let AudioContext = null; // Variable to store the audio context
+        let analyser = null; // Variable to store the audio analyser
+        let dataArray = null; // Variable to store the audio data array
+        let visualizationActive = false; // Variable to store the visualization state
+
+        // Elements and initial setup
+        const logs = document.getElementById('myTextarea'); // Textarea to display logs
+        addLogMessage('Init...'); // Initial message in the textarea
+
+        const visualizer = document.getElementById('audio-visualizer');
+        for (let i = 0; i < 10; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'visualizer-bar';
+            visualizer.appendChild(bar);
+        }
+
+
+        let api_key = ""; // API key provided by the user
+        let client_id = ""; // Client ID provided by the user
+        let client_secret = ""; // Client secret provided by the user
+
+        // Supported MIME types for audio recording
+        const MIMETYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4", "audio/aac"];
+        const MIMETYPE = MIMETYPES.find(mt => MediaRecorder.isTypeSupported(mt)); // Select the first compatible type
+
+        // Generate unique identifiers for room and doctor
+        const ROOM = generateUUID();
+        const DOCTOR = generateUUID();
+
+        addLogMessage(`Audio codec: ${MIMETYPE}`);
+        addLogMessage('Ready!');
+
+        // Check for credentials
+        if (api_key === "" || client_id === "" || client_secret === "") {
+            addLogMessage('Before start enter your credentials');
+        }
+
+        // Adjust chunk size if the MIME type is 'audio/mp4'
+        if (MIMETYPE === "audio/mp4") {
+            trunkSize = 1000;
+        }
+
+        // Prompt user for credentials when clicking the credentials button
+        document.getElementById('credentialsBtn').addEventListener('click', () => {
+            api_key = prompt("Please enter your API KEY:");
+            client_id = prompt("Please enter your CLIENT ID:");
+            client_secret = prompt("Please enter your CLIENT SECRET:");
+        });
+
+        // Clear the logs when the clear button is clicked
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            logs.value = '';
+        });
+
+        // Fetch and store the authentication token
+        document.getElementById('getToken').addEventListener('click', () => {
+            if (api_key === "" || client_id === "" || client_secret === "") {
+                addLogMessage('Please enter your credentials');
+                return;
+            }
+
+            fetch('https://api-beta.listen.doctor/v1/iam', {
+                method: 'POST', // Use POST to send data
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': api_key
+                },
+                body: JSON.stringify({
+                    client_id: client_id ,
+                    client_secret: client_secret,
+                    grant_type: 'client_credentials',
+                    doctor: DOCTOR
+                })
+            })
+            .then(response => {
+                console.log('Request headers:', Object.fromEntries(response.headers));
+
+                if (!response.ok) {
+                    throw new Error(response.statusText);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Success:', data.token);
+                document.getElementById('fetchTemplates').disabled = false;
+                document.getElementById('fetchSpecialities').disabled = false;
+                token = data.token;
+                addLogMessage("< Token:\n"+token);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                addLogMessage("< "+error);
+            });
+        });
+
+        // Fetch templates data when clicking fetchTemplates button
+        document.getElementById('fetchTemplates').addEventListener('click', () => {
+            if (token === '') {
+                addLogMessage("> You need to get a token first");
+                return;
+            }
+            fetch('https://api-beta.listen.doctor/v1/templates/public', {
+                method: 'GET', 
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': api_key,
+                    'Authorization': 'Bearer '+token
+                }
+            })
+            .then(response => {
+                console.log('Request headers:', Object.fromEntries(response.headers));
+
+                if (!response.ok) {
+                    throw new Error('< Response: ' + response.statusText);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Success:', data);
+                const jsonText = JSON.stringify(data, null, 2); 
+
+                addLogMessage(jsonText);
+
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });            
+        });
+
+        // Fetch specialities data when clicking fetchSpecialities button
+        document.getElementById('fetchSpecialities').addEventListener('click', () => {
+            if (token === '') {
+                addLogMessage("> You need to get a token first");
+                return;
+            }
+            fetch('https://api-beta.listen.doctor/v1/specialities', {
+                method: 'GET', 
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': api_key,
+                    'Authorization': 'Bearer '+token
+                }
+            })
+            .then(response => {
+                console.log('Request headers:', Object.fromEntries(response.headers));
+
+                if (!response.ok) {
+                    throw new Error('< Response: ' + response.statusText);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Success:', data);
+                const jsonText = JSON.stringify(data, null, 2); 
+                addLogMessage(jsonText);
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });   
+        });
+
+        // Connect to the Socket.IO server when connect button is clicked
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            if (token === "") {
+                addLogMessage('Get your token first');
+                return;
+            }
+
+            addLogMessage('> Connect to server...');
+            socket = io("https://api-beta.listen.doctor", {
+                auth: {
+                    authorization: 'Bearer '+token
+                }
+            });
+
+            // Handle successful connection
+            socket.on('connect', () => {
+                addLogMessage('< Connected to server!');
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+                document.getElementById('joinRoomBtn').disabled = false;
+            });
+
+            // Handle disconnection
+            socket.on('disconnect', () => {
+                addLogMessage('< Disconnected from server!');
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+                document.getElementById('joinRoomBtn').disabled = true;
+                document.getElementById('startRecordingBtn').disabled = true;
+                document.getElementById('stopRecordingBtn').disabled = true;
+            });
+
+            // Handle recording start event from server
+            socket.on('recording_started', (data) => {
+                console.log('Recording started:', data);
+                addLogMessage('< Recording started');
+            });
+
+            // Handle completion of audio processing
+            socket.on('processing_complete', (data) => {
+                addLogMessage('Processing complete');
+                addLogMessage(data.summary);
+                addLogMessage("----------------------------------------------");
+                addLogMessage(data.transcription);
+                console.log('< Processing complete:', data);
+            });
+
+            // Handle socket errors
+            socket.on('error', (error) => {
+                console.error('Socket error:', error);
+                addLogMessage('< Socket error: '+error.message);
+            });
+
+            // Handle joining a room
+            socket.on('room_joined', (data) => {
+                console.log(`Joined room: ${data.room}`);
+                document.getElementById('joinRoomBtn').disabled = true;
+                document.getElementById('startRecordingBtn').disabled = false;
+                addLogMessage(`< Joined room: ${data.room}`);
+            });
+
+        });
+
+        // Disconnect from the server when disconnect button is clicked
+        document.getElementById('disconnectBtn').addEventListener('click', () => {
+            addLogMessage('> Disconnect from server...');
+            socket.disconnect();
+        });
+
+        // Request to join a room when joinRoom button is clicked
+        document.getElementById('joinRoomBtn').addEventListener('click', () => {
+            addLogMessage('> Ask for join room...');
+            socket.emit('join_room', { room: ROOM });
+        });
+
+        // Start recording audio and emit to server
+        document.getElementById('startRecordingBtn').addEventListener('click', async () => {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 44100
+            });
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                mediaRecorder = new MediaRecorder(stream);
+                let isRecordingActive = true;
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+
+                const sourceNode = audioContext.createMediaStreamSource(stream);
+                sourceNode.connect(analyser);
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (isRecordingActive && event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async () => {
+                    isRecordingActive = false;
+                    
+                    // Esperar un pequeño tiempo para asegurar que todos los chunks se han recibido
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    if (audioChunks.length > 0) {
+                        await sendAudioChunk();
+                    }
+                    
+                    // Limpiar recursos
+                    clearInterval(chunkInterval);
+                    audioChunks = [];
+                    stream.getTracks().forEach(track => track.stop());
+                    
+                    // Notificar al servidor que la grabación ha terminado
+                    socket.emit('stop_recording');
+                    console.log('Recording stopped and cleanup completed');
+                };
+
+                mediaRecorder.start();
+                console.log('Recording started');
+                
+                socket.emit('start_recording', {
+                    username: 'User1',
+                    fileExtension: '.wav',
+                    config: {
+                        prompt: 'DIABETES',
+                        language: 'es',
+                        speciality: 'Endocrinologia',
+                        datetime: "26 de octubre de 2024, 19:25" //new Date().toISOString()
+                    }
+                });
+
+                chunkInterval = setInterval(() => {
+                    if (isRecordingActive) {
+                        mediaRecorder.requestData();
+                        if (audioChunks.length > 0) {
+                            sendAudioChunk();
+                        }
+                    }
+                }, trunkSize);
+
+                startVisualization();
+
+                document.getElementById('stopRecordingBtn').disabled = false;
+                document.getElementById('startRecordingBtn').disabled = true;
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                addLogMessage('Error accessing microphone: ' + error.message);
+            }
+        });
+
+        // Stop recording when stop button is clicked
+        document.getElementById('stopRecordingBtn').addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                document.getElementById('startRecordingBtn').disabled = false;
+                document.getElementById('stopRecordingBtn').disabled = true;
+                stopVisualization();
+                mediaRecorder.stop();
+            }
+        });
+
+
+        // Function to send audio chunks to server with Promise
+        function sendAudioChunk() {
+            return new Promise((resolve, reject) => {
+                if (audioChunks.length === 0) {
+                    resolve();
+                    return;
+                }
+
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const reader = new FileReader();
+
+                reader.onload = () => {
+                    const buffer = new Uint8Array(reader.result);
+                    socket.emit('audio_chunk', buffer, (response) => {
+                        if (response && response.status === 'success') {
+                            console.log('Audio chunk sent successfully');
+                            resolve();
+                        } else {
+                            const error = response?.error || 'Unknown error';
+                            console.error('Error sending audio chunk:', error);
+                            reject(error);
+                        }
+                    });
+                };
+
+                reader.onerror = (error) => {
+                    console.error('Error reading audio chunk:', error);
+                    reject(error);
+                };
+
+                reader.readAsArrayBuffer(audioBlob);
+                audioChunks = [];
+            });
+        }
+
+
+        function startVisualization() {
+            if (visualizationActive) return; // Evitar múltiples instancias
+                
+            visualizationActive = true;
+            const visualizer = document.getElementById('audio-visualizer');
+            const bars = visualizer.children;
+            
+            const updateVisualizer = () => {
+                if (!visualizationActive) {
+                    return; // Detener la animación
+                }
+
+                analyser.getByteFrequencyData(dataArray);
+                
+                for (let i = 0; i < bars.length; i++) {
+                    const value = dataArray[i];
+                    const height = value * 100 / 255;
+                    bars[i].style.height = `${height}%`;
+                    const opacity = 0.3 + (value / 255 * 0.7);
+                    bars[i].style.opacity = opacity;
+                }
+
+                animationFrame = requestAnimationFrame(updateVisualizer);
+            };
+
+            updateVisualizer();
+        }
+
+        function stopVisualization() {
+            visualizationActive = false;
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+                animationFrame = null;
+                const bars = visualizer.children;
+                for (let i = 0; i < bars.length; i++) {
+                    bars[i].style.height = '0%';
+                    bars[i].style.opacity = '0.3';
+                }
+
+            }
+        }
+
+        // Function to generate unique UUIDs
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function addLogMessage(message) {
+            logs.value += message + "\n"; // Add new message to the textarea
+            logs.scrollTop = logs.scrollHeight; // Scroll to the bottom
+        }
+
+    </script>
+</body>
+</html>
